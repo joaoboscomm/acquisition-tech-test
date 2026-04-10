@@ -1,0 +1,477 @@
+{
+  "name": "Data Ingestion — All Sources (HubSpot, ChargeHub, PayEngine, Skool, FX)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "b1b2c3d4-0001-4000-8000-000000000001",
+      "name": "HubSpot Sync Schedule (Daily 2AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 200],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "contact",
+        "operation": "getAll",
+        "returnAll": true,
+        "additionalFields": {
+          "properties": [
+            "email",
+            "firstname",
+            "lastname",
+            "membership_id",
+            "membership_tier",
+            "membership_mrr",
+            "membership_currency",
+            "membership_type",
+            "membership_billing_date",
+            "membership_billing_source",
+            "membership_status",
+            "membership_create_date"
+          ]
+        }
+      },
+      "id": "b1b2c3d4-0002-4000-8000-000000000002",
+      "name": "HubSpot — Get All Contacts",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [-300, 200],
+      "credentials": {
+        "hubspotApi": {
+          "id": "hubspot-credential-id",
+          "name": "HubSpot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport uuid\nfrom datetime import datetime, timezone\n\nresults = []\n\nfor item in _items:\n    props = item[\"json\"].get(\"properties\", item[\"json\"])\n    hs_id = str(item[\"json\"].get(\"id\", \"\"))\n    email = (props.get(\"email\", \"\") or \"\").strip().lower()\n    if not email:\n        continue\n\n    contributor_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email))\n    now = datetime.now(timezone.utc).isoformat()\n\n    row = {\n        # Contributor\n        \"contributor_id\": contributor_id,\n        \"display_name\": f\"{props.get('firstname', '')} {props.get('lastname', '')}\".strip() or email,\n        # Identifier (email)\n        \"identifier_type\": \"email\",\n        \"identifier_value\": email,\n        \"id_source_system\": \"hubspot\",\n        # Identifier (hubspot_contact_id)\n        \"hs_contact_id\": hs_id,\n        # Membership snapshot\n        \"hubspot_membership_id\": props.get(\"membership_id\", \"\") or \"\",\n        \"tier_name\": props.get(\"membership_tier\", \"\") or \"\",\n        \"mrr\": props.get(\"membership_mrr\", \"\") or \"\",\n        \"mrr_currency\": props.get(\"membership_currency\", \"\") or \"\",\n        \"billing_source\": props.get(\"membership_billing_source\", \"\") or \"\",\n        \"billing_date\": props.get(\"membership_billing_date\", \"\") or \"\",\n        \"status\": props.get(\"membership_status\", \"\") or \"\",\n        \"membership_type\": props.get(\"membership_type\", \"\") or \"\",\n        \"created_at\": props.get(\"membership_create_date\", now) or now\n    }\n    results.append({\"json\": row})\n\nreturn results if results else [{\"json\": {\"_skip\": True}}]"
+      },
+      "id": "b1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Transform Contacts → Contributors + Memberships",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Upsert contributor\nINSERT INTO contributors (contributor_id, display_name, updated_at)\nVALUES (\n  '{{ $json.contributor_id }}'::uuid,\n  '{{ ($json.display_name || \"\").replace(/'/g, \"''\") }}',\n  NOW()\n)\nON CONFLICT (contributor_id) DO UPDATE\nSET display_name = EXCLUDED.display_name, updated_at = NOW();\n\n-- Upsert email identifier\nINSERT INTO contributor_identifiers (contributor_id, identifier_type, identifier_value, source_system, is_primary)\nVALUES (\n  '{{ $json.contributor_id }}'::uuid,\n  'email',\n  '{{ $json.identifier_value }}',\n  'hubspot',\n  TRUE\n)\nON CONFLICT (identifier_type, identifier_value, source_system) DO NOTHING;\n\n-- Upsert HubSpot contact ID identifier\nINSERT INTO contributor_identifiers (contributor_id, identifier_type, identifier_value, source_system)\nVALUES (\n  '{{ $json.contributor_id }}'::uuid,\n  'hubspot_contact_id',\n  '{{ $json.hs_contact_id }}',\n  'hubspot'\n)\nON CONFLICT (identifier_type, identifier_value, source_system) DO NOTHING;\n\n-- Insert membership snapshot (immutable — new row per sync)\nINSERT INTO memberships (\n  contributor_id, hubspot_membership_id, hubspot_contact_id,\n  tier_name, mrr, mrr_currency, billing_source, billing_date,\n  status, membership_type, created_at\n)\nSELECT\n  '{{ $json.contributor_id }}'::uuid,\n  '{{ $json.hubspot_membership_id }}',\n  '{{ $json.hs_contact_id }}',\n  NULLIF('{{ $json.tier_name }}', ''),\n  NULLIF('{{ $json.mrr }}', '')::NUMERIC,\n  NULLIF('{{ $json.mrr_currency }}', ''),\n  NULLIF('{{ $json.billing_source }}', ''),\n  NULLIF('{{ $json.billing_date }}', '')::DATE,\n  NULLIF('{{ $json.status }}', ''),\n  NULLIF('{{ $json.membership_type }}', ''),\n  '{{ $json.created_at }}'::TIMESTAMPTZ\nWHERE '{{ $json.hubspot_membership_id }}' != '';",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Persist Contributors + Memberships",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [300, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chargehub-charge-event",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0005-4000-8000-000000000005",
+      "name": "ChargeHub Charge Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-600, 500],
+      "disabled": true,
+      "webhookId": "charge-event-ingest-001",
+      "notes": "Receives charge.processed events from ChargeHub. Same transform + persist pattern as PayEngine (Path 3)."
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport uuid\nfrom datetime import datetime, timezone, timedelta\n\nbody = _items[0][\"json\"].get(\"body\", _items[0][\"json\"])\n\ncharge_id = body.get(\"charge_id\", \"\")\nemail = (body.get(\"email\", \"\") or \"\").strip().lower()\nprocessed_at = body.get(\"processed_at\", datetime.now(timezone.utc).isoformat())\nline_item = body.get(\"line_item\", \"\")\ntotal_price = float(body.get(\"total_price\", 0) or 0)\ncurrency = body.get(\"currency\", \"USD\")\n\n# Convert to PST\ntry:\n    pst = timezone(timedelta(hours=-8))\n    dt = datetime.fromisoformat(processed_at.replace(\"Z\", \"+00:00\"))\n    processed_at_pst = dt.astimezone(pst).isoformat()\nexcept Exception:\n    processed_at_pst = processed_at\n\n# Non-USD normalization via tier lookup (from reconcile.py)\nTIER_USD = {\"starter\": 750, \"pro\": 2500, \"executive\": 6000, \"executive annual\": 24000}\nnormalized_usd = total_price\nif currency.upper() != \"USD\":\n    normalized_usd = TIER_USD.get(line_item.lower().strip(), total_price)\n\nbilling_period = processed_at_pst[:7] if len(processed_at_pst) >= 7 else processed_at[:7]\ncontributor_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email)) if email else None\n\nreturn [{\"json\": {\n    \"source_system\": \"chargehub\",\n    \"event_type\": \"charge_processed\",\n    \"source_event_id\": charge_id,\n    \"event_timestamp\": processed_at,\n    \"payload\": json.dumps(body),\n    \"contributor_id\": contributor_id,\n    \"email\": email,\n    \"processed_at\": processed_at,\n    \"processed_at_pst\": processed_at_pst,\n    \"tier_name\": line_item,\n    \"presentment_amount\": total_price,\n    \"presentment_currency\": currency,\n    \"usd_amount\": total_price if currency.upper() == \"USD\" else None,\n    \"normalized_usd\": normalized_usd,\n    \"billing_period\": billing_period\n}}]"
+      },
+      "id": "b1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Transform ChargeHub → Raw Event + Charge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Insert raw billing event (immutable, deduped)\nINSERT INTO raw_billing_events (\n  source_system, event_type, source_event_id,\n  event_timestamp, payload\n) VALUES (\n  '{{ $json.source_system }}',\n  '{{ $json.event_type }}',\n  '{{ $json.source_event_id }}',\n  '{{ $json.event_timestamp }}'::TIMESTAMPTZ,\n  '{{ $json.payload }}'::JSONB\n)\nON CONFLICT (source_system, source_event_id) DO NOTHING;\n\n-- Insert transformed charge row\nINSERT INTO charges (\n  raw_event_id, contributor_id, source_system, source_charge_id,\n  email, processed_at, processed_at_pst, tier_name,\n  presentment_amount, presentment_currency, usd_amount,\n  normalized_usd, billing_period\n)\nSELECT\n  (SELECT event_id FROM raw_billing_events WHERE source_system = '{{ $json.source_system }}' AND source_event_id = '{{ $json.source_event_id }}'),\n  NULLIF('{{ $json.contributor_id }}', 'None')::UUID,\n  '{{ $json.source_system }}',\n  '{{ $json.source_event_id }}',\n  '{{ $json.email }}',\n  '{{ $json.processed_at }}'::TIMESTAMPTZ,\n  '{{ $json.processed_at_pst }}'::TIMESTAMPTZ,\n  NULLIF('{{ $json.tier_name }}', ''),\n  {{ $json.presentment_amount || 0 }},\n  '{{ $json.presentment_currency }}',\n  NULLIF('{{ $json.usd_amount }}', 'None')::NUMERIC,\n  {{ $json.normalized_usd || 0 }},\n  '{{ $json.billing_period }}'\nON CONFLICT (source_system, source_charge_id) DO NOTHING;",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Persist ChargeHub Raw Event + Charge",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [0, 500]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "payengine-charge-event",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0012-4000-8000-000000000012",
+      "name": "PayEngine Charge Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-600, 1100],
+      "disabled": true,
+      "webhookId": "charge-event-ingest-002",
+      "notes": "Receives charge.processed events from PayEngine. Same dedup + persist pattern as ChargeHub (Path 2), only source_system and field mapping differ."
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport uuid\nfrom datetime import datetime, timezone, timedelta\n\nbody = _items[0][\"json\"].get(\"body\", _items[0][\"json\"])\n\n# PayEngine uses different field names than ChargeHub\ncharge_id = body.get(\"transaction_id\", body.get(\"charge_id\", \"\"))\nemail = (body.get(\"customer_email\", body.get(\"email\", \"\")) or \"\").strip().lower()\nprocessed_at = body.get(\"created_at\", body.get(\"processed_at\", datetime.now(timezone.utc).isoformat()))\nline_item = body.get(\"product_name\", body.get(\"line_item\", \"\"))\ntotal_price = float(body.get(\"amount\", body.get(\"total_price\", 0)) or 0)\ncurrency = body.get(\"currency\", \"USD\")\n\n# Convert to PST\ntry:\n    pst = timezone(timedelta(hours=-8))\n    dt = datetime.fromisoformat(processed_at.replace(\"Z\", \"+00:00\"))\n    processed_at_pst = dt.astimezone(pst).isoformat()\nexcept Exception:\n    processed_at_pst = processed_at\n\nTIER_USD = {\"starter\": 750, \"pro\": 2500, \"executive\": 6000, \"executive annual\": 24000}\nnormalized_usd = total_price\nif currency.upper() != \"USD\":\n    normalized_usd = TIER_USD.get(line_item.lower().strip(), total_price)\n\nbilling_period = processed_at_pst[:7] if len(processed_at_pst) >= 7 else processed_at[:7]\ncontributor_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email)) if email else None\n\nreturn [{\"json\": {\n    \"source_system\": \"payengine\",\n    \"event_type\": \"charge_processed\",\n    \"source_event_id\": charge_id,\n    \"event_timestamp\": processed_at,\n    \"payload\": json.dumps(body),\n    \"contributor_id\": contributor_id,\n    \"email\": email,\n    \"processed_at\": processed_at,\n    \"processed_at_pst\": processed_at_pst,\n    \"tier_name\": line_item,\n    \"presentment_amount\": total_price,\n    \"presentment_currency\": currency,\n    \"usd_amount\": total_price if currency.upper() == \"USD\" else None,\n    \"normalized_usd\": normalized_usd,\n    \"billing_period\": billing_period\n}}]"
+      },
+      "id": "b1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Transform PayEngine → Raw Event + Charge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 1100],
+      "notes": "Same logic as ChargeHub transform but maps PayEngine field names (transaction_id, customer_email, amount, product_name) to the unified schema."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Insert raw billing event (immutable, deduped)\nINSERT INTO raw_billing_events (\n  source_system, event_type, source_event_id,\n  event_timestamp, payload\n) VALUES (\n  '{{ $json.source_system }}',\n  '{{ $json.event_type }}',\n  '{{ $json.source_event_id }}',\n  '{{ $json.event_timestamp }}'::TIMESTAMPTZ,\n  '{{ $json.payload }}'::JSONB\n)\nON CONFLICT (source_system, source_event_id) DO NOTHING;\n\n-- Insert transformed charge row\nINSERT INTO charges (\n  raw_event_id, contributor_id, source_system, source_charge_id,\n  email, processed_at, processed_at_pst, tier_name,\n  presentment_amount, presentment_currency, usd_amount,\n  normalized_usd, billing_period\n)\nSELECT\n  (SELECT event_id FROM raw_billing_events WHERE source_system = '{{ $json.source_system }}' AND source_event_id = '{{ $json.source_event_id }}'),\n  NULLIF('{{ $json.contributor_id }}', 'None')::UUID,\n  '{{ $json.source_system }}',\n  '{{ $json.source_event_id }}',\n  '{{ $json.email }}',\n  '{{ $json.processed_at }}'::TIMESTAMPTZ,\n  '{{ $json.processed_at_pst }}'::TIMESTAMPTZ,\n  NULLIF('{{ $json.tier_name }}', ''),\n  {{ $json.presentment_amount || 0 }},\n  '{{ $json.presentment_currency }}',\n  NULLIF('{{ $json.usd_amount }}', 'None')::NUMERIC,\n  {{ $json.normalized_usd || 0 }},\n  '{{ $json.billing_period }}'\nON CONFLICT (source_system, source_charge_id) DO NOTHING;",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0014-4000-8000-000000000014",
+      "name": "Persist PayEngine Raw Event + Charge",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [0, 1100]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "b1b2c3d4-0015-4000-8000-000000000015",
+      "name": "Skool Pull Schedule (Daily 6AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 1400],
+      "disabled": true,
+      "notes": "Skool has no webhooks — daily pull is the only option. Runs at 6 AM PST, before the 8 AM reconciliation window."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Fetch the last successful pull timestamp (cursor-based pagination)\nSELECT COALESCE(\n  (SELECT value FROM pipeline_state WHERE key = 'skool_last_pull'),\n  (NOW() - INTERVAL '48 hours')::TEXT\n) AS cursor_ts;",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0016-4000-8000-000000000016",
+      "name": "Get Skool Cursor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-300, 1400],
+      "notes": "Reads the last successful pull timestamp from pipeline_state. Falls back to 48 hours ago on first run."
+    },
+    {
+      "parameters": {
+        "url": "=https://api.skool.com/v1/transactions?since={{ $json.cursor_ts }}&limit=100",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "b1b2c3d4-0017-4000-8000-000000000017",
+      "name": "Skool — Fetch Transactions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 1400],
+      "disabled": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "skool-api-key",
+          "name": "Skool API Key"
+        }
+      },
+      "notes": "Placeholder — actual Skool API endpoint and auth will be configured when credentials are provisioned. Uses cursor_ts from previous node to only fetch new transactions."
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport uuid\nfrom datetime import datetime, timezone, timedelta\n\nresults = []\nmax_ts = \"\"\n\nfor item in _items:\n    txn = item[\"json\"]\n    # Skool transaction fields (adapt to actual API response)\n    charge_id = txn.get(\"id\", txn.get(\"transaction_id\", \"\"))\n    email = (txn.get(\"email\", txn.get(\"member_email\", \"\")) or \"\").strip().lower()\n    processed_at = txn.get(\"created_at\", txn.get(\"processed_at\", datetime.now(timezone.utc).isoformat()))\n    line_item = txn.get(\"plan_name\", txn.get(\"line_item\", \"\"))\n    total_price = float(txn.get(\"amount\", txn.get(\"total_price\", 0)) or 0)\n    currency = txn.get(\"currency\", \"USD\")\n\n    if not email or not charge_id:\n        continue\n\n    # Track latest timestamp for cursor update\n    if processed_at > max_ts:\n        max_ts = processed_at\n\n    # Convert to PST\n    try:\n        pst = timezone(timedelta(hours=-8))\n        dt = datetime.fromisoformat(processed_at.replace(\"Z\", \"+00:00\"))\n        processed_at_pst = dt.astimezone(pst).isoformat()\n    except Exception:\n        processed_at_pst = processed_at\n\n    TIER_USD = {\"starter\": 750, \"pro\": 2500, \"executive\": 6000, \"executive annual\": 24000}\n    normalized_usd = total_price\n    if currency.upper() != \"USD\":\n        normalized_usd = TIER_USD.get(line_item.lower().strip(), total_price)\n\n    billing_period = processed_at_pst[:7] if len(processed_at_pst) >= 7 else processed_at[:7]\n    contributor_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email))\n\n    results.append({\"json\": {\n        \"source_system\": \"skool\",\n        \"event_type\": \"charge_processed\",\n        \"source_event_id\": charge_id,\n        \"event_timestamp\": processed_at,\n        \"payload\": json.dumps(txn),\n        \"contributor_id\": contributor_id,\n        \"email\": email,\n        \"processed_at\": processed_at,\n        \"processed_at_pst\": processed_at_pst,\n        \"tier_name\": line_item,\n        \"presentment_amount\": total_price,\n        \"presentment_currency\": currency,\n        \"usd_amount\": total_price if currency.upper() == \"USD\" else None,\n        \"normalized_usd\": normalized_usd,\n        \"billing_period\": billing_period,\n        \"_cursor_ts\": max_ts\n    }})\n\nreturn results if results else [{\"json\": {\"_skip\": True, \"_cursor_ts\": max_ts}}]"
+      },
+      "id": "b1b2c3d4-0018-4000-8000-000000000018",
+      "name": "Transform Skool → Raw Events + Charges",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 1400],
+      "notes": "Batch transform: loops through all Skool transactions, converts to the unified charge schema. Tracks max timestamp for cursor update."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Insert raw billing event (immutable, deduped)\nINSERT INTO raw_billing_events (\n  source_system, event_type, source_event_id,\n  event_timestamp, payload\n) VALUES (\n  '{{ $json.source_system }}',\n  '{{ $json.event_type }}',\n  '{{ $json.source_event_id }}',\n  '{{ $json.event_timestamp }}'::TIMESTAMPTZ,\n  '{{ $json.payload }}'::JSONB\n)\nON CONFLICT (source_system, source_event_id) DO NOTHING;\n\n-- Insert transformed charge row\nINSERT INTO charges (\n  raw_event_id, contributor_id, source_system, source_charge_id,\n  email, processed_at, processed_at_pst, tier_name,\n  presentment_amount, presentment_currency, usd_amount,\n  normalized_usd, billing_period\n)\nSELECT\n  (SELECT event_id FROM raw_billing_events WHERE source_system = '{{ $json.source_system }}' AND source_event_id = '{{ $json.source_event_id }}'),\n  NULLIF('{{ $json.contributor_id }}', 'None')::UUID,\n  '{{ $json.source_system }}',\n  '{{ $json.source_event_id }}',\n  '{{ $json.email }}',\n  '{{ $json.processed_at }}'::TIMESTAMPTZ,\n  '{{ $json.processed_at_pst }}'::TIMESTAMPTZ,\n  NULLIF('{{ $json.tier_name }}', ''),\n  {{ $json.presentment_amount || 0 }},\n  '{{ $json.presentment_currency }}',\n  NULLIF('{{ $json.usd_amount }}', 'None')::NUMERIC,\n  {{ $json.normalized_usd || 0 }},\n  '{{ $json.billing_period }}'\nON CONFLICT (source_system, source_charge_id) DO NOTHING;",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0019-4000-8000-000000000019",
+      "name": "Persist Skool Raw Event + Charge",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 1400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Update cursor only after successful persist (idempotent pull)\nINSERT INTO pipeline_state (key, value, updated_at)\nVALUES ('skool_last_pull', '{{ $json._cursor_ts }}', NOW())\nON CONFLICT (key) DO UPDATE\nSET value = EXCLUDED.value, updated_at = NOW()\nWHERE EXCLUDED.value > pipeline_state.value;",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0020-4000-8000-000000000020",
+      "name": "Update Skool Cursor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [900, 1400],
+      "notes": "Only advances the cursor if the new timestamp is later than the stored one. Safe to re-run — the WHERE clause prevents regression."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "b1b2c3d4-0008-4000-8000-000000000008",
+      "name": "FX Rate Schedule (Daily 6AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 800],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.exchangerate.host/latest?base=USD&symbols=BRL,GBP,EUR,CAD,AUD,MXN",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Fetch FX Rates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-300, 800]
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "from datetime import date\n\nresponse = _items[0][\"json\"]\nrates = response.get(\"rates\", {})\nif not rates and \"data\" in response:\n    rates = response[\"data\"].get(\"rates\", {})\nrate_date = response.get(\"date\", date.today().isoformat())\n\nresult = []\nfor currency, rate in rates.items():\n    if currency == \"USD\":\n        continue\n    foreign_to_usd = (1 / rate) if rate > 0 else 0\n    result.append({\"json\": {\n        \"rate_date\": rate_date,\n        \"currency_from\": currency,\n        \"rate\": f\"{foreign_to_usd:.6f}\",\n        \"source\": \"exchangerate.host\"\n    }})\n\nreturn result if result else [{\"json\": {\"skip\": True}}]"
+      },
+      "id": "b1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Parse FX Rates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, 800]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO exchange_rates (rate_date, currency_from, currency_to, rate, source)\nVALUES (\n  '{{ $json.rate_date }}'::DATE,\n  '{{ $json.currency_from }}',\n  'USD',\n  {{ $json.rate }},\n  '{{ $json.source }}'\n)\nON CONFLICT (rate_date, currency_from, currency_to) DO UPDATE\nSET rate = EXCLUDED.rate, ingested_at = NOW();",
+        "options": {}
+      },
+      "id": "b1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Upsert FX Rates",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [300, 800]
+    }
+  ],
+  "connections": {
+    "HubSpot Sync Schedule (Daily 2AM)": {
+      "main": [
+        [
+          {
+            "node": "HubSpot — Get All Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot — Get All Contacts": {
+      "main": [
+        [
+          {
+            "node": "Transform Contacts → Contributors + Memberships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Contacts → Contributors + Memberships": {
+      "main": [
+        [
+          {
+            "node": "Persist Contributors + Memberships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ChargeHub Charge Webhook": {
+      "main": [
+        [
+          {
+            "node": "Transform ChargeHub → Raw Event + Charge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform ChargeHub → Raw Event + Charge": {
+      "main": [
+        [
+          {
+            "node": "Persist ChargeHub Raw Event + Charge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PayEngine Charge Webhook": {
+      "main": [
+        [
+          {
+            "node": "Transform PayEngine → Raw Event + Charge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform PayEngine → Raw Event + Charge": {
+      "main": [
+        [
+          {
+            "node": "Persist PayEngine Raw Event + Charge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skool Pull Schedule (Daily 6AM)": {
+      "main": [
+        [
+          {
+            "node": "Get Skool Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Skool Cursor": {
+      "main": [
+        [
+          {
+            "node": "Skool — Fetch Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skool — Fetch Transactions": {
+      "main": [
+        [
+          {
+            "node": "Transform Skool → Raw Events + Charges",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Skool → Raw Events + Charges": {
+      "main": [
+        [
+          {
+            "node": "Persist Skool Raw Event + Charge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Skool Raw Event + Charge": {
+      "main": [
+        [
+          {
+            "node": "Update Skool Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FX Rate Schedule (Daily 6AM)": {
+      "main": [
+        [
+          {
+            "node": "Fetch FX Rates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch FX Rates": {
+      "main": [
+        [
+          {
+            "node": "Parse FX Rates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse FX Rates": {
+      "main": [
+        [
+          {
+            "node": "Upsert FX Rates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f8e98a05b78046efce62eecf78d6c0a5eb5e8c4c6e68a635f1f337bd73ea5423"
+  }
+}

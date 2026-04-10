@@ -1,0 +1,10 @@
+contact_id,membership_id,matching_email,membership_tier,chargehub_line_item,membership_billing_date,chargehub_processed_date,membership_mrr,chargehub_total_price,membership_mrr_normalized,chargehub_total_price_normalized,membership_currency,chargehub_currency,membership_billing_source,membership_status,membership_type,tier_mismatch,billing_date_mismatch,mrr_mismatch,mrr_normalized_mismatch,currency_mismatch,billing_source_mismatch,status_mismatch,type_mismatch
+2201,70002201,tyler@brooksconsulting.io,Starter,Starter,2026-04-06,2026-04-06,750.0,750.0,750.0,750.0,USD,USD,ChargeHub,Active,Paying Member,False,False,False,False,False,False,False,False
+2202,70002202,camila@ferreiraco.com,Starter,Starter,2026-04-04,2026-04-04,3900.0,710.0,750.0,750.0,BRL,BRL,ChargeHub,Active,Paying Member,False,False,True,False,False,False,False,False
+2203,70002203,r.patel.contracts@protonmail.com,Pro,Pro,2026-04-09,2026-04-09,2500.0,2500.0,2500.0,2500.0,USD,USD,ChargeHub,Active,Paying Member,False,False,False,False,False,False,False,False
+2204,70002204,marcus@webbgroupllc.com,Starter,Starter,2026-04-11,2026-04-11,750.0,750.0,750.0,750.0,USD,USD,ChargeHub,Active,Paying Member,False,False,False,False,False,False,False,False
+2205,70002205,priya@nairventures.co,Starter,Starter,2026-04-30,2026-04-30,750.0,750.0,750.0,750.0,USD,USD,ChargeHub,Active,Paying Member,False,False,False,False,False,False,False,False
+,,billing@zephyrcorp.net,,Starter,,2026-04-13,,750.0,,750.0,,USD,,,,True,True,True,True,True,True,True,True
+2208,70002208,natasha@bloomstrategies.com,Starter,Executive,2026-04-08,2026-04-08,750.0,6000.0,750.0,6000.0,USD,USD,ChargeHub,Active,Paying Member,True,False,True,True,False,False,False,False
+2209,70002209,j.larson.biz@gmail.com,Starter,Starter,2026-04-15,2026-04-15,750.0,750.0,750.0,750.0,USD,USD,ChargeHub,Active,Paying Member,False,False,False,False,False,False,False,False
+2206,70002206,derek@oseipartners.com,Starter,,2026-03-18,,750.0,,750.0,,USD,,ChargeHub,Active,Paying Member,False,True,True,True,False,False,False,False

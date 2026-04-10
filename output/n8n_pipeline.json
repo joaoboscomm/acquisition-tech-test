@@ -1,0 +1,497 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chargehub-reconciliation",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "e5a2eda1-110a-4662-a969-9cb26763dbb6",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        2720
+      ],
+      "webhookId": "chargehub-recon-001"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "2e6066fb-97ba-4057-99f1-0fc118b59029",
+      "name": "Schedule Trigger (Daily 8AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        2736,
+        2912
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {},
+      "id": "d4dc6c5f-b5a2-4f89-a236-66a4476bebf0",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        2736,
+        3104
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport uuid\nfrom datetime import datetime, timezone\n\n# Extract charge data from webhook body (or manual/schedule input)\nbody = _items[0][\"json\"].get(\"body\", _items[0][\"json\"])\n\ncharge_id = body.get(\"charge_id\", str(uuid.uuid4())[:12])\nemail = (body.get(\"email\", \"\") or \"\").strip().lower()\nprocessed_at = body.get(\"processed_at\", datetime.now(timezone.utc).isoformat())\nline_item = body.get(\"line_item\", \"\")\ntotal_price = float(body.get(\"total_price\", 0) or 0)\ncurrency = body.get(\"currency\", \"USD\")\nbilling_period = body.get(\"billing_period\", datetime.now(timezone.utc).strftime(\"%Y-%m\"))\n\nrun_id = str(uuid.uuid4())\ntriggered_by = \"webhook\"\n\nparams = {\n    \"charge_id\": charge_id,\n    \"email\": email,\n    \"processed_at\": processed_at,\n    \"line_item\": line_item,\n    \"total_price\": total_price,\n    \"currency\": currency,\n    \"billing_period\": billing_period,\n    \"run_id\": run_id,\n    \"triggered_by\": triggered_by\n}\n\n# Write context file so Process & Classify can access charge data\nwith open('/tmp/.n8n_run_context.json', 'w') as f:\n    json.dump(params, f)\n\nreturn [{\"json\": params}]"
+      },
+      "id": "f12c26fa-c02a-4f2d-b7ec-076a25beacdc",
+      "name": "Set Run Parameters",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        2912
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT run_id FROM reconciliation_runs\nWHERE source_system = 'chargehub'\n  AND status = 'completed'\n  AND summary->>'charge_id' = '{{ $json.charge_id }}'\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "2bdf5a30-2279-498d-96f2-151f0ad7372f",
+      "name": "Check Idempotency",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3184,
+        2912
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.run_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c02547f4-ac58-46b6-aecd-4154d417971e",
+      "name": "Already Processed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3408,
+        2912
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO reconciliation_runs (\n  run_id, billing_period, source_system, status, triggered_by, started_at, summary\n) VALUES (\n  '{{ $('Set Run Parameters').item.json.run_id }}'::uuid,\n  '{{ $('Set Run Parameters').item.json.billing_period }}',\n  'chargehub',\n  'running',\n  '{{ $('Set Run Parameters').item.json.triggered_by }}',\n  NOW(),\n  jsonb_build_object('charge_id', '{{ $('Set Run Parameters').item.json.charge_id }}')\n);",
+        "options": {}
+      },
+      "id": "4144ee68-2437-4d86-b519-699cb3c6a11d",
+      "name": "Register Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3632,
+        3040
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"filterGroups\": [\n    {\n      \"filters\": [\n        {\n          \"propertyName\": \"email\",\n          \"operator\": \"EQ\",\n          \"value\": \"{{ $('Set Run Parameters').item.json.email }}\"\n        }\n      ]\n    }\n  ],\n  \"properties\": [\n    \"email\", \"firstname\", \"lastname\",\n    \"membership_id\", \"membership_tier\", \"membership_mrr\",\n    \"membership_currency\", \"membership_type\",\n    \"membership_billing_date\", \"membership_billing_source\",\n    \"membership_status\", \"membership_create_date\"\n  ],\n  \"limit\": 1\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "11fdd1f9-7338-4500-8b84-fe0c8c9bf0bb",
+      "name": "HubSpot — Search by Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3856,
+        3056
+      ],
+      "notes": "Searches HubSpot contacts by exact email match. Uses HTTP Request instead of native node to support custom membership properties."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bedf9751-8982-4284-a09d-e76064573e9e",
+      "name": "Contact Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4080,
+        3056
+      ],
+      "notes": "Checks if HubSpot API returned at least one contact result."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"filterGroups\": [\n    {\n      \"filters\": [\n        {\n          \"propertyName\": \"email\",\n          \"operator\": \"CONTAINS_TOKEN\",\n          \"value\": \"{{ $('Set Run Parameters').item.json.email.split('@')[1] || '' }}\"\n        }\n      ]\n    }\n  ],\n  \"properties\": [\n    \"email\", \"firstname\", \"lastname\",\n    \"membership_id\", \"membership_tier\", \"membership_mrr\",\n    \"membership_currency\", \"membership_type\",\n    \"membership_billing_date\", \"membership_billing_source\",\n    \"membership_status\", \"membership_create_date\"\n  ],\n  \"limit\": 5\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "ce0cc538-f8f3-4e33-b1cb-cd2c67fef9bf",
+      "name": "HubSpot — Fallback Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4304,
+        3152
+      ],
+      "notes": "Fallback: searches by email domain if exact email match fails. Returns up to 5 contacts at the same domain for manual review."
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nfrom datetime import datetime\n\n# ── Load charge data from context file ──\nwith open('/tmp/.n8n_run_context.json', 'r') as f:\n    charge = json.load(f)\n\n# ── Load HubSpot data from upstream node ──\nhs_data = _items[0][\"json\"] if _items else {}\ncontact = None\nprops = {}\n\n# Handle both native HubSpot node and HTTP Request response formats\nif hs_data.get(\"id\"):\n    contact = hs_data\n    props = contact.get(\"properties\", {})\nelif hs_data.get(\"results\"):\n    results = hs_data[\"results\"]\n    if results:\n        contact = results[0]\n        props = contact.get(\"properties\", {})\n\n# ── Tier normalization lookup (from reconcile.py) ──\nTIER_USD = {\n    \"starter\": 750.0,\n    \"pro\": 2500.0,\n    \"executive\": 6000.0,\n    \"executive annual\": 24000.0,\n}\n\nemail = charge.get(\"email\", \"\")\ncharge_tier = (charge.get(\"line_item\", \"\") or \"\").strip()\ncharge_price = float(charge.get(\"total_price\", 0) or 0)\ncharge_currency = charge.get(\"currency\", \"USD\")\ncharge_date = charge.get(\"processed_at\", \"\")\nrun_id = charge.get(\"run_id\", \"\")\ncharge_id = charge.get(\"charge_id\", \"\")\n\n# Normalize charge amount (non-USD → use tier lookup)\ncharge_normalized = charge_price\nif charge_currency.upper() != \"USD\":\n    charge_normalized = TIER_USD.get(charge_tier.lower().strip(), charge_price)\n\n# ── Default result: no HubSpot match (untracked) ──\nresult = {\n    \"run_id\": run_id,\n    \"charge_id\": charge_id,\n    \"matching_email\": email,\n    \"match_type\": \"charge_no_crm\",\n    \"revenue_status\": \"untracked\",\n    \"severity\": \"critical\",\n    \"revenue_at_risk\": charge_normalized,\n    \"contact_id\": \"\",\n    \"membership_id\": \"\",\n    \"membership_tier\": \"\",\n    \"membership_mrr\": None,\n    \"membership_mrr_normalized\": None,\n    \"membership_currency\": \"\",\n    \"membership_billing_date\": \"\",\n    \"membership_billing_source\": \"\",\n    \"membership_status\": \"\",\n    \"membership_type\": \"\",\n    \"chargehub_line_item\": charge_tier,\n    \"chargehub_total_price\": charge_price,\n    \"chargehub_total_price_normalized\": charge_normalized,\n    \"chargehub_currency\": charge_currency,\n    \"chargehub_processed_date\": charge_date,\n    \"tier_mismatch\": True,\n    \"billing_date_mismatch\": True,\n    \"mrr_mismatch\": True,\n    \"mrr_normalized_mismatch\": True,\n    \"currency_mismatch\": True,\n    \"billing_source_mismatch\": True,\n    \"status_mismatch\": True,\n    \"type_mismatch\": True,\n    \"fix_instructions\": f\"No HubSpot contact found for {email}. Create contact and link membership.\",\n    \"audit_category\": \"missing_record\",\n    \"audit_summary\": f\"Charge for {email} ({charge_tier}, ${charge_price}) has no HubSpot contact. Revenue collected but not tracked.\"\n}\n\nif contact:\n    contact_id = props.get(\"hs_object_id\", \"\") or str(contact.get(\"id\", \"\"))\n    m_tier = (props.get(\"membership_tier\", \"\") or \"\").strip()\n    m_mrr_raw = props.get(\"membership_mrr\", \"\")\n    m_mrr = float(m_mrr_raw) if m_mrr_raw else None\n    m_currency = (props.get(\"membership_currency\", \"\") or \"\").strip()\n    m_type = (props.get(\"membership_type\", \"\") or \"\").strip()\n    m_billing_date = (props.get(\"membership_billing_date\", \"\") or \"\").strip()\n    m_billing_source = (props.get(\"membership_billing_source\", \"\") or \"\").strip()\n    m_status = (props.get(\"membership_status\", \"\") or \"\").strip()\n    m_id = props.get(\"membership_id\", \"\") or \"\"\n\n    if not m_tier and not m_id:\n        # Contact exists but no membership data linked\n        result[\"contact_id\"] = contact_id\n        result[\"fix_instructions\"] = f\"Contact {email} found (ID: {contact_id}) but no membership linked. Create membership.\"\n    else:\n        # ── Normalize membership MRR (non-USD → tier lookup) ──\n        m_mrr_normalized = m_mrr\n        if m_mrr and m_currency and m_currency.upper() != \"USD\":\n            m_mrr_normalized = TIER_USD.get(m_tier.lower().strip(), m_mrr)\n\n        # ── Compute mismatch flags ──\n        tier_mm = charge_tier.lower().strip() != m_tier.lower().strip() if m_tier else True\n        mrr_mm = abs(charge_price - (m_mrr or 0)) > 0.01 if m_mrr is not None else True\n        mrr_norm_mm = abs(charge_normalized - (m_mrr_normalized or 0)) > 0.01 if m_mrr_normalized is not None else True\n        currency_mm = charge_currency.upper() != m_currency.upper() if m_currency else False\n        source_mm = m_billing_source.lower() != \"chargehub\" if m_billing_source else True\n        status_mm = m_status.lower() != \"active\" if m_status else True\n        type_mm = m_type.lower() != \"paying member\" if m_type else True\n\n        # Date proximity (±1 day, ported from reconcile.py)\n        date_mm = True\n        if m_billing_date and charge_date:\n            try:\n                def parse_date(s):\n                    if \"T\" in s:\n                        return datetime.fromisoformat(s.replace(\"Z\", \"+00:00\")).date()\n                    return datetime.strptime(s[:10], \"%Y-%m-%d\").date()\n                date_mm = abs((parse_date(m_billing_date) - parse_date(charge_date)).days) > 1\n            except Exception:\n                pass\n\n        # ── Classify revenue status ──\n        any_mm = any([tier_mm, mrr_mm, mrr_norm_mm, currency_mm, source_mm, status_mm, type_mm, date_mm])\n\n        if tier_mm:\n            rev_status, sev = \"disputed\", \"critical\"\n            risk = abs(charge_normalized - (m_mrr_normalized or 0))\n        elif any_mm:\n            rev_status, sev, risk = \"disputed\", \"warning\", 0\n        else:\n            rev_status, sev, risk = \"confirmed\", \"info\", 0\n\n        # ── Build fix instructions ──\n        fixes = []\n        if tier_mm: fixes.append(f\"Tier: ChargeHub={charge_tier}, HubSpot={m_tier}\")\n        if mrr_mm: fixes.append(f\"MRR: ChargeHub=${charge_price}, HubSpot=${m_mrr}\")\n        if currency_mm: fixes.append(f\"Currency: {charge_currency} vs {m_currency}\")\n        if source_mm: fixes.append(f\"Billing source: {m_billing_source or 'unknown'}\")\n        if status_mm: fixes.append(f\"Status: {m_status or 'unknown'} (expected Active)\")\n        if type_mm: fixes.append(f\"Type: {m_type or 'unknown'} (expected Paying Member)\")\n\n        # ── Build audit entry ──\n        audit_cat, audit_sum = \"billing_metadata\", f\"Metadata mismatch for {email}.\"\n        if rev_status == \"untracked\":\n            audit_cat = \"missing_record\"\n            audit_sum = f\"Charge for {email} ({charge_tier}, ${charge_price}) has no HubSpot contact.\"\n        elif tier_mm:\n            audit_cat = \"tier\"\n            audit_sum = f\"Tier mismatch for {email}: ChargeHub={charge_tier}, HubSpot={m_tier}. Revenue at risk: ${risk}/mo.\"\n        elif mrr_mm:\n            audit_cat = \"mrr\"\n            audit_sum = f\"MRR mismatch for {email}: ChargeHub ${charge_price} vs HubSpot ${m_mrr}.\"\n        elif currency_mm:\n            audit_cat = \"currency\"\n            audit_sum = f\"Currency mismatch for {email}: {charge_currency} vs {m_currency}.\"\n\n        result.update({\n            \"match_type\": \"matched\",\n            \"revenue_status\": rev_status,\n            \"severity\": sev,\n            \"revenue_at_risk\": risk,\n            \"contact_id\": contact_id,\n            \"membership_id\": m_id,\n            \"membership_tier\": m_tier,\n            \"membership_mrr\": m_mrr,\n            \"membership_mrr_normalized\": m_mrr_normalized,\n            \"membership_currency\": m_currency,\n            \"membership_billing_date\": m_billing_date,\n            \"membership_billing_source\": m_billing_source,\n            \"membership_status\": m_status,\n            \"membership_type\": m_type,\n            \"tier_mismatch\": tier_mm,\n            \"billing_date_mismatch\": date_mm,\n            \"mrr_mismatch\": mrr_mm,\n            \"mrr_normalized_mismatch\": mrr_norm_mm,\n            \"currency_mismatch\": currency_mm,\n            \"billing_source_mismatch\": source_mm,\n            \"status_mismatch\": status_mm,\n            \"type_mismatch\": type_mm,\n            \"fix_instructions\": \"; \".join(fixes) if fixes else \"\",\n            \"audit_category\": audit_cat,\n            \"audit_summary\": audit_sum\n        })\n\n# Build alert text\nalert = f\"*{result['revenue_status'].upper()}* — {email}\"\nif result[\"revenue_status\"] != \"confirmed\":\n    alert += f\"\\nSeverity: {result['severity']}\"\n    if result[\"revenue_at_risk\"] > 0:\n        alert += f\"\\nRevenue at risk: ${result['revenue_at_risk']:,.2f}\"\n    if result.get(\"fix_instructions\"):\n        alert += f\"\\nFix: {result['fix_instructions']}\"\nresult[\"alert_text\"] = alert\n\nreturn [{\"json\": result}]"
+      },
+      "id": "053ea5cd-fe24-4670-8517-8638c7607126",
+      "name": "Process & Classify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4528,
+        3040
+      ],
+      "notes": "Core reconciliation logic ported from reconcile.py for single-record processing. Receives HubSpot data from upstream, reads charge data from context file. Classifies: confirmed / disputed / phantom / untracked."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Insert reconciliation result\nINSERT INTO reconciliation_results (\n  run_id, matching_email, match_type, revenue_status,\n  contact_id, membership_id,\n  membership_tier, chargehub_line_item,\n  membership_billing_date, chargehub_processed_date,\n  membership_mrr, chargehub_total_price,\n  membership_mrr_normalized, chargehub_total_price_normalized,\n  membership_currency, chargehub_currency,\n  membership_billing_source, membership_status, membership_type,\n  tier_mismatch, billing_date_mismatch, mrr_mismatch,\n  mrr_normalized_mismatch, currency_mismatch,\n  billing_source_mismatch, status_mismatch, type_mismatch,\n  revenue_at_risk, severity, fix_instructions\n) VALUES (\n  '{{ $('Set Run Parameters').item.json.run_id }}'::uuid,\n  '{{ $('Process & Classify').item.json.matching_email }}',\n  '{{ $('Process & Classify').item.json.match_type }}',\n  '{{ $('Process & Classify').item.json.revenue_status }}',\n  NULLIF('{{ $('Process & Classify').item.json.contact_id }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_id }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_tier }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.chargehub_line_item }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_billing_date }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.chargehub_processed_date }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_mrr }}', '')::NUMERIC,\n  {{ $('Process & Classify').item.json.chargehub_total_price || 0 }},\n  NULLIF('{{ $('Process & Classify').item.json.membership_mrr_normalized }}', '')::NUMERIC,\n  {{ $('Process & Classify').item.json.chargehub_total_price_normalized || 0 }},\n  NULLIF('{{ $('Process & Classify').item.json.membership_currency }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.chargehub_currency }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_billing_source }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_status }}', ''),\n  NULLIF('{{ $('Process & Classify').item.json.membership_type }}', ''),\n  {{ $('Process & Classify').item.json.tier_mismatch }},\n  {{ $('Process & Classify').item.json.billing_date_mismatch }},\n  {{ $('Process & Classify').item.json.mrr_mismatch }},\n  {{ $('Process & Classify').item.json.mrr_normalized_mismatch }},\n  {{ $('Process & Classify').item.json.currency_mismatch }},\n  {{ $('Process & Classify').item.json.billing_source_mismatch }},\n  {{ $('Process & Classify').item.json.status_mismatch }},\n  {{ $('Process & Classify').item.json.type_mismatch }},\n  {{ $('Process & Classify').item.json.revenue_at_risk || 0 }},\n  '{{ $('Process & Classify').item.json.severity }}',\n  '{{ ($('Process & Classify').item.json.fix_instructions || \"\").replace(/'/g, \"''\") }}'\n);\n\n-- Insert audit log entry (only for non-confirmed results)\nINSERT INTO audit_log (\n  event_type, category, severity, source_system,\n  reference_ids, summary, revenue_impact\n)\nSELECT\n  'mismatch_detected',\n  '{{ $('Process & Classify').item.json.audit_category }}',\n  '{{ $('Process & Classify').item.json.severity }}',\n  'chargehub',\n  jsonb_build_object(\n    'run_id', '{{ $('Set Run Parameters').item.json.run_id }}',\n    'contact_id', '{{ $('Process & Classify').item.json.contact_id }}',\n    'charge_id', '{{ $('Set Run Parameters').item.json.charge_id }}'\n  ),\n  '{{ ($('Process & Classify').item.json.audit_summary || \"\").replace(/'/g, \"''\") }}',\n  {{ -($('Process & Classify').item.json.revenue_at_risk || 0) }}\nWHERE '{{ $('Process & Classify').item.json.revenue_status }}' != 'confirmed';",
+        "options": {}
+      },
+      "id": "49628f21-f593-4bdf-ac84-21a95656a027",
+      "name": "Persist Results + Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4752,
+        3040
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE reconciliation_runs\nSET status = 'completed',\n    completed_at = NOW(),\n    summary = jsonb_build_object(\n      'charge_id', '{{ $('Set Run Parameters').item.json.charge_id }}',\n      'email', '{{ $('Set Run Parameters').item.json.email }}',\n      'revenue_status', '{{ $('Process & Classify').item.json.revenue_status }}',\n      'severity', '{{ $('Process & Classify').item.json.severity }}',\n      'revenue_at_risk', {{ $('Process & Classify').item.json.revenue_at_risk || 0 }},\n      'match_type', '{{ $('Process & Classify').item.json.match_type }}'\n    )\nWHERE run_id = '{{ $('Set Run Parameters').item.json.run_id }}'::uuid;",
+        "options": {}
+      },
+      "id": "c74fa476-f114-4433-870b-32ca6e2e6926",
+      "name": "Finalize Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4976,
+        3040
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": "billing-reconciliation",
+        "text": "=:rotating_light: *ChargeHub Reconciliation*\n\n{{ $('Process & Classify').item.json.alert_text }}\n\n_Run: {{ $('Set Run Parameters').item.json.run_id }} | Period: {{ $('Set Run Parameters').item.json.billing_period }}_",
+        "otherOptions": {}
+      },
+      "id": "0c8da0f4-6c46-4791-8dda-acf85f7f5a7b",
+      "name": "Slack — Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        5200,
+        2928
+      ],
+      "webhookId": "b5857e92-4e94-4c6f-8a5c-9f0a0f328530"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Process & Classify').item.json.severity }}",
+              "rightValue": "critical",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "870c5dcf-ac47-47f1-a295-e26ad81056f9",
+      "name": "Is Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5200,
+        3216
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/tasks",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"properties\": {\n    \"hs_task_subject\": \"Reconciliation Fix: {{ $('Process & Classify').item.json.matching_email }} — {{ $('Process & Classify').item.json.chargehub_line_item || 'Unknown Tier' }}\",\n    \"hs_task_body\": \"Reconciliation Alert — {{ $('Set Run Parameters').item.json.billing_period }}\\nContact: {{ $('Process & Classify').item.json.matching_email }}\\nStatus: {{ $('Process & Classify').item.json.revenue_status }}\\nRevenue at Risk: ${{ $('Process & Classify').item.json.revenue_at_risk }}\\nIssue: {{ $('Process & Classify').item.json.fix_instructions }}\\nRun: {{ $('Set Run Parameters').item.json.run_id }}\",\n    \"hs_task_priority\": \"HIGH\",\n    \"hs_task_status\": \"NOT_STARTED\"\n  }\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "17146c7a-c12a-4b78-97f3-941ef01d9b31",
+      "name": "Create HubSpot Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5424,
+        3136
+      ],
+      "notes": "Creates a HIGH priority task in HubSpot for critical reconciliation issues. Uses HTTP Request for direct API control."
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Run Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger (Daily 8AM)": {
+      "main": [
+        [
+          {
+            "node": "Set Run Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Run Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Run Parameters": {
+      "main": [
+        [
+          {
+            "node": "Check Idempotency",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Idempotency": {
+      "main": [
+        [
+          {
+            "node": "Already Processed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Processed?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Register Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register Run": {
+      "main": [
+        [
+          {
+            "node": "HubSpot — Search by Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot — Search by Email": {
+      "main": [
+        [
+          {
+            "node": "Contact Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact Found?": {
+      "main": [
+        [
+          {
+            "node": "Process & Classify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HubSpot — Fallback Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot — Fallback Search": {
+      "main": [
+        [
+          {
+            "node": "Process & Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process & Classify": {
+      "main": [
+        [
+          {
+            "node": "Persist Results + Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Results + Audit": {
+      "main": [
+        [
+          {
+            "node": "Finalize Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Run": {
+      "main": [
+        [
+          {
+            "node": "Slack — Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Critical?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Critical?": {
+      "main": [
+        [
+          {
+            "node": "Create HubSpot Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f8e98a05b78046efce62eecf78d6c0a5eb5e8c4c6e68a635f1f337bd73ea5423"
+  }
+}

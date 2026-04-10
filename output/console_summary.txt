@@ -1,0 +1,29 @@
+=== CHARGEHUB RECONCILIATION — APRIL 2026 ===
+
+ChargeHub:
+  Total charges: 8
+  Total amount (USD): $12,960.00
+  Total amount (normalized): $12,250.00
+
+HubSpot Matched:
+  Contacts matched: 7
+  Total MRR: $10,150.00
+  Total MRR (normalized): $7,000.00
+
+Gap:
+  Amount: $5,250.00
+  Percentage: 42.9%
+
+Mismatches:
+  Tier: 2
+  Billing Date: 2
+  MRR: 4
+  MRR Normalized: 3
+  Currency: 1
+  Billing Source: 1
+  Status: 1
+  Type: 1
+
+Not Found:
+  ChargeHub charges without HubSpot match: 1
+  HubSpot ChargeHub members without charge: 1
